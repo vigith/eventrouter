@@ -18,6 +18,7 @@ package sinks
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/golang/glog"
 	"github.com/spf13/viper"
@@ -29,10 +30,43 @@ type EventSinkInterface interface {
 	UpdateEvents(eNew *v1.Event, eOld *v1.Event)
 }
 
-// ManufactureSink will manufacture a sink according to viper configs
-// TODO: Determine if it should return an array of sinks
-func ManufactureSink() (e EventSinkInterface) {
-	s := viper.GetString("sink")
+// ManufactureSink will manufacture a sink according to viper configs and return a list of sink interfaces
+func ManufactureSink() (e []EventSinkInterface) {
+	// if we find "sink", it means we are using the older style config
+	sink := viper.GetString("sink")
+	if len(sink) != 0 {
+		glog.Warning("Using older configuration format, please move to nested version")
+		return []EventSinkInterface{v1ManufactureSink(sink)}
+	}
+
+	// if we have sinks, then we are using the new style
+	sinks := viper.GetStringSlice("sinks")
+	if len(sinks) != 0 {
+		glog.Info("Using new configuration format")
+		return v2ManufactureSink(sinks)
+	}
+	return
+}
+
+// v2ManufactureSink is the later style of writing the config
+func v2ManufactureSink(sinks []string) (e []EventSinkInterface) {
+	for _, sink := range sinks {
+		switch sink {
+		case "glog":
+			e = append(e, NewGlogSink())
+		case "stdout":
+			viper.SetDefault("stdout.JSONNamespace", "")
+			stdoutNamespace := viper.GetString("stdout.JSONNamespace")
+			e = append(e, NewStdoutSink(stdoutNamespace))
+		default:
+			panic(fmt.Sprintf("Invalid Sink Specified, %s", sink))
+		}
+	}
+	return
+}
+
+// v1ManufactureSink is the old way config.json format
+func v1ManufactureSink(s string) (e EventSinkInterface) {
 	glog.Infof("Sink is [%v]", s)
 	switch s {
 	case "glog":

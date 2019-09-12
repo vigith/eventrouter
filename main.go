@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"net/http"
 	"os"
@@ -57,9 +58,8 @@ func sigHandler() <-chan struct{} {
 	return stop
 }
 
-// loadConfig will parse input + config file and return a clientset
-func loadConfig() kubernetes.Interface {
-	var config *rest.Config
+// read viper configs
+func loadViperConfig() {
 	var err error
 
 	flag.Parse()
@@ -77,12 +77,21 @@ func loadConfig() kubernetes.Interface {
 		panic(err.Error())
 	}
 
-	viper.BindEnv("kubeconfig") // Allows the KUBECONFIG env var to override where the kubeconfig is
+	err = viper.BindEnv("kubeconfig") // Allows the KUBECONFIG env var to override where the kubeconfig is
+	if err != nil {
+		glog.Fatalf("BindEnv Failed, %s", err)
+	}
 
 	// Allow specifying a custom config file via the EVENTROUTER_CONFIG env var
 	if forceCfg := os.Getenv("EVENTROUTER_CONFIG"); forceCfg != "" {
 		viper.SetConfigFile(forceCfg)
 	}
+}
+
+// loadConfig will parse input + config file and return a clientset
+func loadK8sConfig() kubernetes.Interface {
+	var config *rest.Config
+	var err error
 	kubeconfig := viper.GetString("kubeconfig")
 	if len(kubeconfig) > 0 {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -101,16 +110,13 @@ func loadConfig() kubernetes.Interface {
 	return clientset
 }
 
-// main entry point of the program
-func main() {
+func startController(ctx context.Context, clientset kubernetes.Interface) {
 	var wg sync.WaitGroup
-
-	clientset := loadConfig()
 	sharedInformers := informers.NewSharedInformerFactory(clientset, viper.GetDuration("resync-interval"))
 	eventsInformer := sharedInformers.Core().V1().Events()
 
 	// TODO: Support locking for HA https://github.com/kubernetes/kubernetes/pull/42666
-	eventRouter := NewEventRouter(clientset, eventsInformer)
+	eventRouter := NewEventRouter(ctx, clientset, eventsInformer)
 	stop := sigHandler()
 
 	// Startup the http listener for Prometheus Metrics endpoint.
@@ -132,5 +138,19 @@ func main() {
 	sharedInformers.Start(stop)
 	wg.Wait()
 	glog.Warningf("Exiting main()")
+}
+
+// main entry point of the program
+func main() {
+	loadViperConfig()
+
+	clientset := loadK8sConfig()
+
+	// we use context to cancel the go routines created in sink, etc.
+	ctx := context.Background()
+
+	// makes testing easier if we separate out the controller
+	startController(ctx, clientset)
+
 	os.Exit(1)
 }

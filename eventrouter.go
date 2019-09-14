@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/golang/glog"
@@ -62,6 +63,10 @@ func init() {
 // EventRouter is responsible for maintaining a stream of kubernetes
 // system Events and pushing them to another channel for storage
 type EventRouter struct {
+	// AddEventHandler do not take context, so we need to pass it around so that
+	// we can propagate cancel to the sinks
+	ctx context.Context
+
 	// kubeclient is the main kubernetes interface
 	kubeClient kubernetes.Interface
 
@@ -71,16 +76,16 @@ type EventRouter struct {
 	// returns true if the event store has been synced
 	eListerSynched cache.InformerSynced
 
-	// event sink
-	// TODO: Determine if we want to support multiple sinks.
-	eSink sinks.EventSinkInterface
+	// event sinks
+	eSink []sinks.EventSinkInterface
 }
 
 // NewEventRouter will create a new event router using the input params
-func NewEventRouter(kubeClient kubernetes.Interface, eventsInformer coreinformers.EventInformer) *EventRouter {
+func NewEventRouter(ctx context.Context, kubeClient kubernetes.Interface, eventsInformer coreinformers.EventInformer) *EventRouter {
 	er := &EventRouter{
+		ctx:        ctx,
 		kubeClient: kubeClient,
-		eSink:      sinks.ManufactureSink(),
+		eSink:      sinks.ManufactureSink(ctx),
 	}
 	eventsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    er.addEvent,
@@ -111,7 +116,9 @@ func (er *EventRouter) Run(stopCh <-chan struct{}) {
 func (er *EventRouter) addEvent(obj interface{}) {
 	e := obj.(*v1.Event)
 	prometheusEvent(e)
-	er.eSink.UpdateEvents(e, nil)
+	for _, eSink := range er.eSink {
+		eSink.UpdateEvents(e, nil)
+	}
 }
 
 // updateEvent is called any time there is an update to an existing event
@@ -119,7 +126,9 @@ func (er *EventRouter) updateEvent(objOld interface{}, objNew interface{}) {
 	eOld := objOld.(*v1.Event)
 	eNew := objNew.(*v1.Event)
 	prometheusEvent(eNew)
-	er.eSink.UpdateEvents(eNew, eOld)
+	for _, eSink := range er.eSink {
+		eSink.UpdateEvents(eNew, eOld)
+	}
 }
 
 // prometheusEvent is called when an event is added or updated

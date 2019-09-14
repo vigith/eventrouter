@@ -17,6 +17,7 @@ limitations under the License.
 package sinks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,39 +26,48 @@ import (
 	v1 "k8s.io/api/core/v1"
 )
 
-// EventSinkInterface is the interface used to shunt events
+// update events could be send via channels too
+type UpdateEvent struct {
+	eNew *v1.Event
+	eOld *v1.Event
+}
+
+// EventSinkInterface is the interface used to shunt events. It is upto the implementer of the sink
+// to make sure the
 type EventSinkInterface interface {
 	UpdateEvents(eNew *v1.Event, eOld *v1.Event)
 }
 
 // ManufactureSink will manufacture a sink according to viper configs and return a list of sink interfaces
-func ManufactureSink() (e []EventSinkInterface) {
-	// if we find "sink", it means we are using the older style config
-	sink := viper.GetString("sink")
-	if len(sink) != 0 {
-		glog.Warning("Using older configuration format, please move to nested version")
-		return []EventSinkInterface{v1ManufactureSink(sink)}
-	}
-
+func ManufactureSink(ctx context.Context) (e []EventSinkInterface) {
+	// check for new style first
 	// if we have sinks, then we are using the new style
 	sinks := viper.GetStringSlice("sinks")
 	if len(sinks) != 0 {
 		glog.Info("Using new configuration format")
-		return v2ManufactureSink(sinks)
+		return v2ManufactureSink(ctx, sinks)
 	}
+
+	// if we find "sink", it means we are using the older style config
+	sink := viper.GetString("sink")
+	if len(sink) != 0 {
+		glog.Warning("Using older configuration format, please move to nested version")
+		return []EventSinkInterface{v1ManufactureSink(ctx, sink)}
+	}
+
 	return
 }
 
 // v2ManufactureSink is the later style of writing the config
-func v2ManufactureSink(sinks []string) (e []EventSinkInterface) {
+func v2ManufactureSink(ctx context.Context, sinks []string) (e []EventSinkInterface) {
 	for _, sink := range sinks {
 		switch sink {
 		case "glog":
-			e = append(e, NewGlogSink())
+			e = append(e, NewGlogSink(ctx))
 		case "stdout":
 			viper.SetDefault("stdout.JSONNamespace", "")
 			stdoutNamespace := viper.GetString("stdout.JSONNamespace")
-			e = append(e, NewStdoutSink(stdoutNamespace))
+			e = append(e, NewStdoutSink(ctx, stdoutNamespace))
 		default:
 			panic(fmt.Sprintf("Invalid Sink Specified, %s", sink))
 		}
@@ -66,15 +76,15 @@ func v2ManufactureSink(sinks []string) (e []EventSinkInterface) {
 }
 
 // v1ManufactureSink is the old way config.json format
-func v1ManufactureSink(s string) (e EventSinkInterface) {
+func v1ManufactureSink(ctx context.Context, s string) (e EventSinkInterface) {
 	glog.Infof("Sink is [%v]", s)
 	switch s {
 	case "glog":
-		e = NewGlogSink()
+		e = NewGlogSink(ctx)
 	case "stdout":
 		viper.SetDefault("stdoutJSONNamespace", "")
 		stdoutNamespace := viper.GetString("stdoutJSONNamespace")
-		e = NewStdoutSink(stdoutNamespace)
+		e = NewStdoutSink(ctx, stdoutNamespace)
 	case "http":
 		url := viper.GetString("httpSinkUrl")
 		if url == "" {

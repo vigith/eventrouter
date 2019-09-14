@@ -17,30 +17,71 @@ limitations under the License.
 package sinks
 
 import (
+	"context"
 	"encoding/json"
-
 	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
+	"sync"
 )
+
+// let's have few go routines to emit out glog.
+const glogSinkConcurrency = 5
 
 // GlogSink is the most basic sink
 // Useful when you already have ELK/EFK Stack
 type GlogSink struct {
-	// TODO: create a channel and buffer for scaling
+	updateChan chan UpdateEvent
 }
 
 // NewGlogSink will create a new
-func NewGlogSink() EventSinkInterface {
-	return &GlogSink{}
+func NewGlogSink(ctx context.Context) EventSinkInterface {
+	gs := &GlogSink{
+		updateChan: make(chan UpdateEvent),
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(glogSinkConcurrency)
+	glog.V(3).Infof("Starting glog sink with concurrency=%d", glogSinkConcurrency)
+	// let's have couple of parallel routines
+	go func() {
+		defer wg.Done()
+		gs.updateEvents(ctx)
+	}()
+
+	// wait
+	go func() {
+		wg.Wait()
+		glog.V(3).Info("Stopping glog sink WaitGroup")
+		close(gs.updateChan)
+	}()
+
+	return gs
 }
 
-// UpdateEvents implements the EventSinkInterface
+// UpdateEvents implements the EventSinkInterface.
+// This is not a non-blocking call because the channel could get full. But ATM I do not care because
+// glog just logs the message. It is CPU heavy (JSON Marshalling) and has no I/O. So the time complexity of the
+// blocking call is very minimal. Also we could spawn more routines of updateEvents to make it concurrent.
 func (gs *GlogSink) UpdateEvents(eNew *v1.Event, eOld *v1.Event) {
-	eData := NewEventData(eNew, eOld)
+	gs.updateChan <- UpdateEvent{
+		eNew: eNew,
+		eOld: eOld,
+	}
+}
 
-	if eJSONBytes, err := json.Marshal(eData); err == nil {
-		glog.Info(string(eJSONBytes))
-	} else {
-		glog.Warningf("Failed to json serialize event: %v", err)
+func (gs *GlogSink) updateEvents(ctx context.Context) {
+	for {
+		select {
+		case event := <-gs.updateChan:
+			eData := NewEventData(event.eNew, event.eOld)
+			if eJSONBytes, err := json.Marshal(eData); err == nil {
+				glog.Info(string(eJSONBytes))
+			} else {
+				glog.Warningf("Failed to json serialize event: %v", err)
+			}
+		case <-ctx.Done():
+			glog.Warning("Ending, glog sink receiver channel, got ctx.Done()")
+			return
+		}
 	}
 }

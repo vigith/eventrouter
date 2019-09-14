@@ -40,7 +40,8 @@ import (
 var addr = flag.String("listen-address", ":8080", "The address to listen on for HTTP requests.")
 
 // setup a signal hander to gracefully exit
-func sigHandler() <-chan struct{} {
+func sigHandler(ctx context.Context) (<-chan struct{}, context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
 	stop := make(chan struct{})
 	go func() {
 		c := make(chan os.Signal, 1)
@@ -51,11 +52,16 @@ func sigHandler() <-chan struct{} {
 			syscall.SIGABRT, // Abnormal termination
 			syscall.SIGILL,  // illegal instruction
 			syscall.SIGFPE)  // floating point - this is why we can't have nice things
-		sig := <-c
-		glog.Warningf("Signal (%v) Detected, Shutting Down", sig)
+		select {
+		case sig := <-c:
+			glog.Warningf("Signal (%v) Detected, Shutting Down", sig)
+		case <-ctx.Done():
+			glog.Warningf("cancelling ctx. ctx.Done invoked, %s", ctx.Err())
+		}
+		cancel()
 		close(stop)
 	}()
-	return stop
+	return stop, ctx
 }
 
 // read viper configs
@@ -115,9 +121,10 @@ func startController(ctx context.Context, clientset kubernetes.Interface) {
 	sharedInformers := informers.NewSharedInformerFactory(clientset, viper.GetDuration("resync-interval"))
 	eventsInformer := sharedInformers.Core().V1().Events()
 
+	stop, ctx := sigHandler(ctx)
+
 	// TODO: Support locking for HA https://github.com/kubernetes/kubernetes/pull/42666
 	eventRouter := NewEventRouter(ctx, clientset, eventsInformer)
-	stop := sigHandler()
 
 	// Startup the http listener for Prometheus Metrics endpoint.
 	go func() {
